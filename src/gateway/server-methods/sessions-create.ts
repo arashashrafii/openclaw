@@ -10,6 +10,10 @@ import {
   validateSessionsCreateParams,
 } from "../../../packages/gateway-protocol/src/index.js";
 import { resolveAgentWorkspaceDir } from "../../agents/agent-scope.js";
+import {
+  InvalidWorktreeBaseRefError,
+  resolveWorktreeBase,
+} from "../../agents/worktrees/base-ref.js";
 import { insideGitCheckout } from "../../agents/worktrees/git.js";
 import { resolveAgentMainSessionKey } from "../../config/sessions/main-session.js";
 import { sessionEntryForkedFromParent } from "../../config/sessions/session-entry-lineage.js";
@@ -441,6 +445,23 @@ export const sessionCreateHandlers: GatewayRequestHandlers = {
         );
         return;
       }
+      if (deferWorktree && requestedWorktreeBaseRef && !requestedProjectGitUrl) {
+        try {
+          await resolveWorktreeBase(workspace, requestedWorktreeBaseRef);
+        } catch (error) {
+          respond(
+            false,
+            undefined,
+            errorShape(
+              error instanceof InvalidWorktreeBaseRefError
+                ? ErrorCodes.INVALID_REQUEST
+                : ErrorCodes.UNAVAILABLE,
+              formatErrorMessage(error),
+            ),
+          );
+          return;
+        }
+      }
       if (deferWorktree) {
         // Persist intent before slow naming/Git/setup. The admitted turn binds the
         // checkout, so failed or interrupted preparation can retry in this session.
@@ -448,6 +469,11 @@ export const sessionCreateHandlers: GatewayRequestHandlers = {
           ...(requestedProjectGitUrl ? {} : { workspace }),
           name: requestedWorktreeName,
           baseRef: requestedWorktreeBaseRef,
+          ...(requestedWorktreeBaseRef
+            ? {
+                baseRefPolicy: requestedProjectGitUrl ? ("validate" as const) : ("strict" as const),
+              }
+            : {}),
           titleSource: buildDashboardSessionTitleSource({
             message: initialMessage ?? "",
             attachments: initialAttachments,

@@ -43,7 +43,7 @@ import {
   setupGatewaySessionsHandlerTestHarness,
 } from "./test/server-sessions.test-helpers.js";
 
-const projectCloneMocks = vi.hoisted(() => ({ materialize: vi.fn() }));
+const projectCloneMocks = vi.hoisted(() => ({ materialize: vi.fn(), refresh: vi.fn() }));
 const titleMocks = vi.hoisted(() => ({ generate: vi.fn() }));
 
 vi.mock("../auto-reply/reply/conversation-label-generator.js", () => ({
@@ -52,7 +52,11 @@ vi.mock("../auto-reply/reply/conversation-label-generator.js", () => ({
 
 vi.mock("../projects/project-clone.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../projects/project-clone.js")>();
-  return { ...actual, materializeProjectClone: projectCloneMocks.materialize };
+  return {
+    ...actual,
+    materializeProjectClone: projectCloneMocks.materialize,
+    refreshProjectClone: projectCloneMocks.refresh,
+  };
 });
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
@@ -62,6 +66,7 @@ const { createSessionStoreDir } = setupGatewaySessionsHandlerTestHarness();
 afterEach(() => {
   titleMocks.generate.mockReset();
   projectCloneMocks.materialize.mockReset();
+  projectCloneMocks.refresh.mockReset();
   dispatchInboundMessageMock.mockReset();
   closeOpenClawStateDatabaseForTest();
   testState.agentConfig = undefined;
@@ -69,11 +74,11 @@ afterEach(() => {
 
 test.each([
   { worktree: false, sandboxed: false },
-  { worktree: true, sandboxed: false, image: true },
+  { worktree: true, sandboxed: false, image: true, baseRef: "main" },
   { worktree: false, sandboxed: true },
 ])(
-  "sessions.create admits remote project work (worktree=$worktree, sandboxed=$sandboxed) before materialization and dispatches only after authoritative binding",
-  async ({ worktree, sandboxed, image }) => {
+  "sessions.create admits remote project work (worktree=$worktree, base=$baseRef, sandboxed=$sandboxed) before materialization and dispatches only after authoritative binding",
+  async ({ worktree, sandboxed, image, baseRef }) => {
     const root = tempDirs.make("openclaw-session-remote-project-startup-");
     const workspace = await initializeRepository(root, "workspace");
     const projectRoot = await initializeRepository(sandboxed ? workspace : root, "project");
@@ -123,7 +128,9 @@ test.each([
           message: "Inspect the remote project",
           ...(attachments ? { attachments } : {}),
           projectGitUrl: "git@github.com:OpenClaw/OpenClaw.git",
-          ...(worktree ? { worktree: true, worktreeName: "remote-startup" } : {}),
+          ...(worktree
+            ? { worktree: true, worktreeName: "remote-startup", worktreeBaseRef: baseRef }
+            : {}),
         },
         { ...controlUiClient, context },
       );
@@ -142,7 +149,13 @@ test.each([
       expect(loadSessionEntry({ agentId: "main", sessionKey: key, storePath })).toMatchObject({
         sessionId,
         pendingProjectGitUrl: "https://github.com/openclaw/openclaw.git",
+        ...(worktree ? { pendingWorktree: { baseRef } } : {}),
       });
+      if (worktree) {
+        expect(
+          loadSessionEntry({ agentId: "main", sessionKey: key, storePath })?.pendingWorktree,
+        ).toMatchObject({ baseRefPolicy: "validate" });
+      }
       await vi.waitFor(() => expect(projectCloneMocks.materialize).toHaveBeenCalledOnce());
       expect(projectCloneMocks.materialize).toHaveBeenCalledWith(
         expect.objectContaining({ gitUrl: "https://github.com/openclaw/openclaw.git" }),
@@ -222,6 +235,7 @@ test.each([
             }),
       });
       if (worktree) {
+        expect(managedWorktrees.findLiveByOwner("session", key)?.baseRef).toBe("main");
         expect(prepared?.spawnedCwd).not.toBe(projectRoot);
         expect(await fs.readFile(path.join(prepared!.spawnedCwd!, "README.md"), "utf8")).toBe(
           "project\n",
@@ -518,6 +532,7 @@ test.each([false, true])(
           agentId: "main",
           message: "Start during setup",
           worktree: true,
+          worktreeBaseRef: "main",
           label: "Concurrent setup",
         },
         options,
@@ -530,7 +545,7 @@ test.each([false, true])(
       expect(dispatchInboundMessageMock).not.toHaveBeenCalled();
       expect(
         loadSessionEntry({ agentId: "main", sessionKey: key, storePath })?.pendingWorktree,
-      ).toBeDefined();
+      ).toMatchObject({ baseRef: "main", baseRefPolicy: "strict" });
       const sent = await directSessionReq(
         "chat.send",
         {
