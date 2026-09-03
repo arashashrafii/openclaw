@@ -219,7 +219,7 @@ export function sidebarPanelDefinitions(
     definePanel(
       "companion",
       "companion",
-      icons.bot,
+      icons.messageSquarePlus,
       companion,
       params
         ? {
@@ -247,11 +247,9 @@ export function sidebarPanelDefinitions(
               ?disabled=${!params.connected || params.tasksLoading}
               @click=${params.onRefreshTasks}
             >
-              ${
-                params.tasksLoading
-                  ? html`<span class="btn__spinner" aria-hidden="true"></span>`
-                  : icons.refresh
-              }
+              ${params.tasksLoading
+                ? html`<span class="btn__spinner" aria-hidden="true"></span>`
+                : icons.refresh}
             </button>
           </openclaw-tooltip>`
         : undefined,
