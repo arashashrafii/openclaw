@@ -1,16 +1,31 @@
+import DOMPurify from "dompurify";
 import { renderMermaidSvg, type MermaidTheme } from "@openclaw/mermaid-renderer";
 import { css, html, nothing, type PropertyValues } from "lit";
 import { property, state } from "lit/decorators.js";
+import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { t } from "../i18n/index.ts";
 import { copyToClipboard } from "../lib/clipboard.ts";
 import { resolveThemeColor } from "../lib/theme-color.ts";
 import { OpenClawLitElement } from "../lit/openclaw-element.ts";
+import { highlightCodeHtml } from "./markdown-code-blocks.ts";
 import { icons } from "./icons.ts";
 import "./image-lightbox.ts";
 import "./web-awesome.ts";
 
 const CACHE_LIMIT = 16;
 const diagrams = new Map<string, Promise<string>>();
+
+function isSvgSource(source: string): boolean {
+  return /^\s*<svg(?:\s|>)/iu.test(source);
+}
+
+function sanitizeSvgSource(source: string): string {
+  const sanitized = DOMPurify.sanitize(source, { USE_PROFILES: { svg: true } });
+  if (!isSvgSource(sanitized)) {
+    throw new Error("Invalid SVG source");
+  }
+  return sanitized;
+}
 
 function currentTheme(): MermaidTheme {
   const root = document.documentElement;
@@ -54,6 +69,13 @@ class OpenClawMermaid extends OpenClawLitElement {
   @state() private pending = false;
   @state() private failed = false;
   @state() private copyResult: boolean | undefined;
+  @state() private svgMarkup = "";
+  @state() private zoom = 1;
+  @state() private panX = 0;
+  @state() private panY = 0;
+  private dragging = false;
+  private dragStartX = 0;
+  private dragStartY = 0;
   private renderKey = "";
   private generation = 0;
   private copyAttempt = 0;
@@ -80,6 +102,27 @@ class OpenClawMermaid extends OpenClawLitElement {
       display: flex;
       align-items: center;
       gap: 2px;
+    }
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      min-height: 42px;
+      padding: 0 8px;
+      border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, var(--text) 8%, transparent);
+    }
+    .toolbar .spacer {
+      flex: 1;
+    }
+    .toolbar button {
+      width: auto;
+      padding: 0 8px;
+      gap: 5px;
+    }
+    .toolbar button.active {
+      background: color-mix(in srgb, var(--text) 16%, transparent);
+      color: var(--text);
     }
     button {
       display: inline-flex;
@@ -146,15 +189,28 @@ class OpenClawMermaid extends OpenClawLitElement {
       background: var(--bg-hover);
     }
     .preview {
-      padding: 36px 16px 16px;
+      height: 420px;
+      padding: 16px;
       overflow: auto;
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      cursor: grab;
+      touch-action: none;
+    }
+    .preview:active {
+      cursor: grabbing;
     }
     img {
       display: block;
       width: 100%;
       max-height: 480px;
       object-fit: contain;
+      transform-origin: top left;
+      user-select: none;
+      pointer-events: none;
     }
+    pre code { color: var(--text); }
     pre {
       margin: 0;
       padding: 36px 16px 16px;
@@ -212,6 +268,8 @@ class OpenClawMermaid extends OpenClawLitElement {
       this.copyResult = undefined;
       this.copyAttempt += 1;
       this.releaseImage();
+      this.svgMarkup = "";
+      this.resetView();
       void this.renderDiagram();
     }
   }
@@ -221,6 +279,87 @@ class OpenClawMermaid extends OpenClawLitElement {
       URL.revokeObjectURL(this.imageUrl);
       this.imageUrl = "";
     }
+  }
+
+  private resetView() {
+    this.zoom = 1;
+    this.panX = 0;
+    this.panY = 0;
+  }
+
+  private zoomAt(delta: number, event?: MouseEvent) {
+    const preview = this.shadowRoot?.querySelector<HTMLElement>(".preview");
+    const oldZoom = this.zoom;
+    const nextZoom = Math.max(0.5, Math.min(3, oldZoom + delta));
+    const rect = preview?.getBoundingClientRect();
+    const x = event && rect ? event.clientX - rect.left : (rect?.width ?? 0) / 2;
+    const y = event && rect ? event.clientY - rect.top : (rect?.height ?? 0) / 2;
+    this.panX = x - (x - this.panX) * nextZoom / oldZoom;
+    this.panY = y - (y - this.panY) * nextZoom / oldZoom;
+    this.zoom = nextZoom;
+  }
+
+  private startPan(event: PointerEvent) {
+    this.dragging = true;
+    this.dragStartX = event.clientX - this.panX;
+    this.dragStartY = event.clientY - this.panY;
+    (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+  }
+
+  private movePan(event: PointerEvent) {
+    if (!this.dragging) return;
+    this.panX = event.clientX - this.dragStartX;
+    this.panY = event.clientY - this.dragStartY;
+    event.preventDefault();
+  }
+
+  private stopPan() {
+    this.dragging = false;
+  }
+
+  private async saveBlob(blob: Blob, filename: string) {
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  }
+
+  private download(type: string) {
+    if (!this.svgMarkup) return;
+    if (type === "code") {
+      void this.saveBlob(
+        new Blob([this.source], { type: "text/plain;charset=utf-8" }),
+        "diagram.svg",
+      );
+      return;
+    }
+    if (type === "svg") {
+      void this.saveBlob(new Blob([this.svgMarkup], { type: "image/svg+xml" }), "diagram.svg");
+      return;
+    }
+    const image = new Image();
+    image.onload = () => {
+      const svg = this.shadowRoot?.querySelector("img");
+      const width = svg?.naturalWidth || 1200;
+      const height = svg?.naturalHeight || 800;
+      const canvas = document.createElement("canvas");
+      canvas.width = width * 2;
+      canvas.height = height * 2;
+      const context = canvas.getContext("2d");
+      if (!context) return;
+      context.fillStyle = getComputedStyle(this).backgroundColor || "#181818";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob(
+        (blob) => {
+          if (blob) void this.saveBlob(blob, "diagram.png");
+        },
+        "image/png",
+      );
+    };
+    image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(this.svgMarkup)}`;
   }
 
   private async renderDiagram() {
@@ -237,13 +376,16 @@ class OpenClawMermaid extends OpenClawLitElement {
     this.pending = true;
     this.failed = false;
     try {
-      const svg = await cachedDiagram(key, this.source, theme);
+      const svg = isSvgSource(this.source)
+        ? sanitizeSvgSource(this.source)
+        : await cachedDiagram(key, this.source, theme);
       // Remounts, edits and theme switches can overtake asynchronous layout.
       // Only the current connected owner may acquire a new blob URL.
       if (!this.isConnected || generation !== this.generation) {
         return;
       }
       this.releaseImage();
+      this.svgMarkup = svg;
       this.imageUrl = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
     } catch {
       if (this.isConnected && generation === this.generation) {
@@ -275,6 +417,52 @@ class OpenClawMermaid extends OpenClawLitElement {
           : "common.copyFailed",
     );
     return html`
+      <div class="toolbar">
+        <button
+          class=${sourceVisible ? "" : "active"}
+          type="button"
+          aria-label=${t("chat.mermaid.diagram")}
+          @click=${() => (this.showSource = false)}
+        >${icons.image}${t("chat.mermaid.diagram")}</button>
+        <button
+          class=${sourceVisible ? "active" : ""}
+          type="button"
+          aria-label=${t("chat.mermaid.source")}
+          @click=${() => (this.showSource = true)}
+        >${icons.fileCode}${t("chat.mermaid.source")}</button>
+        <span class="spacer"></span>
+        <button
+          type="button"
+          aria-label=${t("chat.imageLightbox.zoomOut")}
+          @click=${() => this.zoomAt(-0.2)}
+        >${icons.minus}</button>
+        <button
+          type="button"
+          aria-label=${t("chat.imageLightbox.zoomIn")}
+          @click=${() => this.zoomAt(0.2)}
+        >${icons.plus}</button>
+        <button type="button" aria-label=${t("chat.imageLightbox.resetZoom")} @click=${() => this.resetView()}>${icons.refresh}</button>
+        <wa-dropdown
+          placement="bottom-end"
+          size="s"
+          .distance=${4}
+          aria-label=${t("chat.imageLightbox.download")}
+          @wa-select=${(event: CustomEvent<{ item: { value?: string } }>) =>
+            this.download(event.detail.item.value ?? "svg")}
+        >
+          <button slot="trigger" type="button" aria-label=${t("chat.imageLightbox.download")}>
+            ${icons.download}${t("chat.imageLightbox.download")}
+          </button>
+          <wa-dropdown-item value="png">PNG</wa-dropdown-item>
+          <wa-dropdown-item value="svg">SVG</wa-dropdown-item>
+          <wa-dropdown-item value="code">Code</wa-dropdown-item>
+        </wa-dropdown>
+        <button
+          type="button"
+          aria-label=${t("desktop.enterFullscreen")}
+          @click=${() => (this.expanded = true)}
+        >${icons.maximize}${t("desktop.enterFullscreen")}</button>
+      </div>
       <div class="actions">
         <button
           class="copy-button"
@@ -333,18 +521,34 @@ class OpenClawMermaid extends OpenClawLitElement {
       }
       ${
         sourceVisible
-          ? html`<pre><code>${this.source}</code></pre>`
+          ? html`<pre><code>${unsafeHTML(
+              highlightCodeHtml(this.source, isSvgSource(this.source) ? "xml" : ""),
+            )}</code></pre>`
           : this.imageUrl
-            ? html`<div class="preview">
+            ? html`<div
+                class="preview"
+                @pointerdown=${(event: PointerEvent) => this.startPan(event)}
+                @pointermove=${(event: PointerEvent) => this.movePan(event)}
+                @pointerup=${() => this.stopPan()}
+                @pointercancel=${() => this.stopPan()}
+                @dblclick=${(event: MouseEvent) => {
+                  event.preventDefault();
+                  this.zoomAt(this.zoom > 1 ? 1 - this.zoom : 0.4, event);
+                }}
+                @wheel=${(event: WheelEvent) => {
+                  event.preventDefault();
+                  this.zoomAt(event.deltaY < 0 ? 0.1 : -0.1, event as unknown as MouseEvent);
+                }}
+              >
                 <img
                   src=${this.imageUrl}
                   alt=${t("chat.mermaid.title")}
+                  style=${`transform: translate(${this.panX}px, ${this.panY}px) scale(${this.zoom});`}
                   @error=${() => {
                     this.failed = true;
                     this.releaseImage();
                   }}
-                />
-              </div>`
+                /></div>`
             : nothing
       }
       ${
@@ -368,7 +572,7 @@ if (!customElements.get("openclaw-mermaid")) {
 
 export function mountMermaidBlocks(root: Element): boolean {
   let mounted = false;
-  for (const block of root.querySelectorAll(".markdown-mermaid")) {
+  for (const block of root.querySelectorAll(".markdown-mermaid, .markdown-svg")) {
     const code = block.querySelector("pre code");
     if (!code) {
       continue;

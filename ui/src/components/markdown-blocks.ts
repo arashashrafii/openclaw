@@ -66,7 +66,7 @@ class MarkdownBlocksDirective extends AsyncDirective {
 
   private scan(root: HTMLElement): void {
     enhanceMarkdownTables(root);
-    if (root.querySelector(".markdown-mermaid pre code")) {
+    if (root.querySelector(".markdown-mermaid pre code, .markdown-svg pre code")) {
       void import("./markdown-mermaid.ts").then(
         ({ mountMermaidBlocks }) => {
           if (
@@ -79,7 +79,7 @@ class MarkdownBlocksDirective extends AsyncDirective {
           }
         },
         () => {
-          for (const block of root.querySelectorAll(".markdown-mermaid")) {
+          for (const block of root.querySelectorAll(".markdown-mermaid, .markdown-svg")) {
             block.classList.remove("markdown-mermaid");
             block.prepend(t("chat.mermaid.error"));
           }
