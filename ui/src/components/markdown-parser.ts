@@ -663,8 +663,9 @@ export function createMarkdownParser(): MarkdownItParser {
     });
     // Keep source readable until the host mounts the lazy renderer. Incomplete
     // streamed fences stay code so partial syntax never starts diagram layout.
-    return language.toLowerCase() === "mermaid" && !openFence
-      ? `<div class="markdown-mermaid">${code}</div>`
+    const normalizedLanguage = language.toLowerCase();
+    return (normalizedLanguage === "mermaid" || normalizedLanguage === "svg") && !openFence
+      ? `<div class="${normalizedLanguage === "svg" ? "markdown-svg" : "markdown-mermaid"}">${code}</div>`
       : code;
   };
   // Override indented code blocks (code_block) with the same treatment as fence

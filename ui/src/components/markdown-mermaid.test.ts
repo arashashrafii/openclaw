@@ -30,7 +30,12 @@ function source(label: string): string {
 async function mount(...sources: string[]) {
   const container = document.body.appendChild(document.createElement("div"));
   containers.add(container);
-  const markdown = sources.map((value) => `\`\`\`mermaid\n${value}\`\`\``).join("\n\n");
+  const markdown = sources
+    .map((value) => {
+      const language = value.trimStart().startsWith("<svg") ? "svg" : "mermaid";
+      return `\`\`\`${language}\n${value}\`\`\``;
+    })
+    .join("\n\n");
   render(html`${unsafeHTML(toSanitizedMarkdownHtml(markdown))}`, container);
   mountMermaidBlocks(container);
   const elements = [...container.querySelectorAll("openclaw-mermaid")];
@@ -105,6 +110,19 @@ afterEach(() => {
 });
 
 describe("Mermaid Markdown presentation", () => {
+  it("renders fenced SVG sources as an image preview without executing markup", async () => {
+    const original =
+      '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script><text>Sales</text></svg>';
+    const {
+      elements: [element],
+    } = await mount(original);
+
+    await vi.waitFor(() => expect(imageSource(element!)).toMatch(/^blob:mermaid-/u));
+    expect(renderSvg).not.toHaveBeenCalled();
+    expect(element!.shadowRoot?.querySelector("script")).toBeNull();
+    expect(element!.shadowRoot?.querySelector("code")?.textContent).toBe(original);
+  });
+
   it.each([true, false])("preserves source and reports copy success=%s", async (copied) => {
     copySource.mockResolvedValueOnce(copied);
     const original = source("x < y & z <script>alert(1)</script>");
